@@ -1,8 +1,7 @@
 const express = require('express');
-const Web3 = require('web3');
+const { ethers } = require('ethers');
 const cors = require('cors');
 const path = require('path');
-const ethUtil = require('ethereumjs-util');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -12,14 +11,14 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// 配置Web3
+// 配置Provider
 const MERLIN_RPC = 'https://rpc.merlinchain.io'; // 替换为实际的RPC节点地址
-const web3 = new Web3(MERLIN_RPC);
+const provider = new ethers.JsonRpcProvider(MERLIN_RPC);
 
 // 检查RPC节点连接
 async function checkRPCConnection() {
     try {
-        await web3.eth.getBlockNumber();
+        await provider.getBlockNumber();
         return true;
     } catch (error) {
         console.error('RPC节点连接失败:', error);
@@ -41,32 +40,15 @@ app.get('/check-rpc', async (req, res) => {
     }
 });
 
-// 从签名恢复地址
-function recoverAddress(message, signature) {
-    try {
-        const messageHash = ethUtil.hashPersonalMessage(ethUtil.toBuffer(message));
-        const signatureParams = ethUtil.fromRpcSig(signature);
-        const publicKey = ethUtil.ecrecover(
-            messageHash,
-            signatureParams.v,
-            signatureParams.r,
-            signatureParams.s
-        );
-        const address = ethUtil.publicToAddress(publicKey);
-        return '0x' + address.toString('hex');
-    } catch (error) {
-        console.error('恢复地址失败:', error);
-        return null;
-    }
-}
-
 // 验证签名
-function verifySignature(message, signature, expectedAddress) {
-    const recoveredAddress = recoverAddress(message, signature);
-    if (!recoveredAddress) {
+async function verifySignature(message, signature, expectedAddress) {
+    try {
+        const recoveredAddress = ethers.verifyMessage(message, signature);
+        return recoveredAddress.toLowerCase() === expectedAddress.toLowerCase();
+    } catch (error) {
+        console.error('验证签名失败:', error);
         return false;
     }
-    return recoveredAddress.toLowerCase() === expectedAddress.toLowerCase();
 }
 
 // 错误处理中间件
@@ -94,12 +76,12 @@ app.post('/broadcast', async (req, res) => {
         }
 
         // 验证签名
-        if (!verifySignature(message, signature, transaction.from)) {
+        if (!await verifySignature(message, signature, transaction.from)) {
             throw new Error('签名验证失败');
         }
 
         // 验证交易哈希
-        const calculatedHash = web3.utils.sha3(JSON.stringify(transaction));
+        const calculatedHash = ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(transaction)));
         if (calculatedHash !== txHash) {
             throw new Error('交易哈希验证失败');
         }
@@ -107,17 +89,16 @@ app.post('/broadcast', async (req, res) => {
         // 使用签名重建交易
         const signedTx = {
             ...transaction,
-            v: ethUtil.fromRpcSig(signature).v,
-            r: ethUtil.fromRpcSig(signature).r,
-            s: ethUtil.fromRpcSig(signature).s
+            signature: signature
         };
 
         // 广播交易
-        const receipt = await web3.eth.sendSignedTransaction(signedTx);
+        const tx = await provider.broadcastTransaction(signedTx);
+        const receipt = await tx.wait();
         
         res.json({
             success: true,
-            txHash: receipt.transactionHash
+            txHash: receipt.hash
         });
     } catch (error) {
         console.error('广播交易失败:', error);

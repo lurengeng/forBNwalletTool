@@ -1,4 +1,5 @@
-let web3;
+let provider;
+let signer;
 let userAddress;
 let currentProvider;
 let currentWallet;
@@ -12,44 +13,11 @@ const WalletType = {
 
 // ERC20代币ABI
 const ERC20_ABI = [
-    {
-        "constant": true,
-        "inputs": [{"name": "_owner", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"name": "balance", "type": "uint256"}],
-        "type": "function"
-    },
-    {
-        "constant": false,
-        "inputs": [
-            {"name": "_to", "type": "address"},
-            {"name": "_value", "type": "uint256"}
-        ],
-        "name": "transfer",
-        "outputs": [{"name": "", "type": "bool"}],
-        "type": "function"
-    },
-    {
-        "constant": true,
-        "inputs": [],
-        "name": "decimals",
-        "outputs": [{"name": "", "type": "uint8"}],
-        "type": "function"
-    },
-    {
-        "constant": true,
-        "inputs": [],
-        "name": "symbol",
-        "outputs": [{"name": "", "type": "string"}],
-        "type": "function"
-    },
-    {
-        "constant": true,
-        "inputs": [],
-        "name": "name",
-        "outputs": [{"name": "", "type": "string"}],
-        "type": "function"
-    }
+    "function balanceOf(address owner) view returns (uint256)",
+    "function transfer(address to, uint256 amount) returns (bool)",
+    "function decimals() view returns (uint8)",
+    "function symbol() view returns (string)",
+    "function name() view returns (string)"
 ];
 
 // 检查钱包是否可用
@@ -93,17 +61,11 @@ async function connectWallet(walletType) {
         // 获取钱包提供者
         currentProvider = getWalletProvider(walletType);
         currentWallet = walletType;
-        web3 = new Web3(currentProvider);
-
-        // 请求连接钱包
-        let accounts;
-        if (walletType === WalletType.OKX) {
-            accounts = await currentProvider.request({ method: 'eth_requestAccounts' });
-        } else {
-            accounts = await currentProvider.request({ method: 'eth_requestAccounts' });
-        }
         
-        userAddress = accounts[0];
+        // 创建ethers provider和signer
+        provider = new ethers.BrowserProvider(currentProvider);
+        signer = await provider.getSigner();
+        userAddress = await signer.getAddress();
         
         // 更新UI
         document.getElementById('walletStatus').textContent = `已连接: ${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
@@ -221,25 +183,16 @@ async function validateContractAddress(address) {
 
 // 将金额转换为代币的最小单位
 function convertToTokenAmount(amount, decimals) {
-    // 将输入的数字转换为字符串，避免JavaScript浮点数精度问题
-    const amountStr = amount.toString();
-    
-    // 检查是否包含小数点
-    if (amountStr.includes('.')) {
-        const [integerPart, decimalPart] = amountStr.split('.');
-        // 确保小数部分长度不超过decimals
-        const paddedDecimal = decimalPart.padEnd(decimals, '0').slice(0, decimals);
-        // 组合整数和小数部分
-        return integerPart + paddedDecimal;
-    } else {
-        // 如果是整数，直接添加decimals个0
-        return amountStr + '0'.repeat(decimals);
+    try {
+        return ethers.parseUnits(amount.toString(), decimals);
+    } catch (error) {
+        throw new Error('金额格式无效');
     }
 }
 
 // 查询代币余额
 async function checkTokenBalance() {
-    if (!currentProvider) {
+    if (!signer) {
         showStatus('请先连接钱包', 'error');
         return;
     }
@@ -251,26 +204,21 @@ async function checkTokenBalance() {
         balanceButton.disabled = true;
         showStatus('正在查询余额...', 'success');
 
-        // 获取并显示网络信息
-        const networkInfo = await getNetworkInfo();
-        console.log('当前网络信息:', networkInfo);
-
         // 验证合约地址
-        const isValidContract = await validateContractAddress(tokenAddress);
-        if (!isValidContract) {
+        if (!ethers.isAddress(tokenAddress)) {
             throw new Error('无效的代币合约地址');
         }
 
         // 创建合约实例
-        const tokenContract = new web3.eth.Contract(ERC20_ABI, tokenAddress);
+        const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
         
         // 获取代币信息
         let tokenInfo = {};
         try {
             tokenInfo = {
-                name: await tokenContract.methods.name().call(),
-                symbol: await tokenContract.methods.symbol().call(),
-                decimals: await tokenContract.methods.decimals().call()
+                name: await tokenContract.name(),
+                symbol: await tokenContract.symbol(),
+                decimals: await tokenContract.decimals()
             };
             console.log('代币信息:', tokenInfo);
         } catch (error) {
@@ -279,12 +227,11 @@ async function checkTokenBalance() {
         }
 
         // 查询余额
-        const balance = await tokenContract.methods.balanceOf(userAddress).call();
-        console.log('原始余额:', balance);
+        const balance = await tokenContract.balanceOf(userAddress);
+        console.log('原始余额:', balance.toString());
         
         // 格式化余额显示
-        const divisor = Math.pow(10, tokenInfo.decimals);
-        const formattedBalance = (Number(balance) / divisor).toFixed(tokenInfo.decimals);
+        const formattedBalance = ethers.formatUnits(balance, tokenInfo.decimals);
         const displayText = tokenInfo.symbol 
             ? `余额: ${formattedBalance} ${tokenInfo.symbol}`
             : `余额: ${formattedBalance}`;
@@ -295,7 +242,7 @@ async function checkTokenBalance() {
         console.error('查询余额详细错误:', error);
         let errorMessage = error.message;
         
-        if (error.message.includes('Out of Gas')) {
+        if (error.message.includes('insufficient funds')) {
             errorMessage = '查询失败：Gas不足或合约地址无效';
         } else if (error.message.includes('invalid address')) {
             errorMessage = '无效的代币合约地址';
@@ -311,16 +258,20 @@ async function checkTokenBalance() {
 
 // 准备ERC20代币转账交易数据
 async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
-    if (!currentProvider) {
+    if (!signer) {
         throw new Error('请先连接钱包');
     }
 
-    const tokenContract = new web3.eth.Contract(ERC20_ABI, tokenAddress);
+    if (!ethers.isAddress(toAddress) || !ethers.isAddress(tokenAddress)) {
+        throw new Error('无效的地址');
+    }
+
+    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
     
     // 获取代币信息
     let decimals;
     try {
-        decimals = await tokenContract.methods.decimals().call();
+        decimals = await tokenContract.decimals();
     } catch (error) {
         console.warn('获取decimals失败，使用默认值18:', error);
         decimals = 18;
@@ -328,36 +279,28 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
     
     // 将金额转换为代币的最小单位
     const amountInSmallestUnit = convertToTokenAmount(amount, decimals);
-    console.log('转换后的金额:', amountInSmallestUnit);
+    console.log('转换后的金额:', amountInSmallestUnit.toString());
     
-    // 获取transfer方法的编码数据
-    const data = tokenContract.methods.transfer(toAddress, amountInSmallestUnit).encodeABI();
-    
-    // 获取nonce和gasPrice
-    const [nonce, gasPrice] = await Promise.all([
-        currentProvider.request({ 
-            method: 'eth_getTransactionCount',
-            params: [userAddress, 'latest']
-        }),
-        currentProvider.request({
-            method: 'eth_gasPrice'
-        })
+    // 获取当前nonce和gasPrice
+    const [nonce, feeData] = await Promise.all([
+        signer.getNonce(),
+        provider.getFeeData()
     ]);
 
     // 构建交易对象
     const transaction = {
         from: userAddress,
         to: tokenAddress,
-        value: '0x0',
-        data: data,
-        gas: '0x' + (21000).toString(16), // 使用固定gas限制
-        gasPrice: gasPrice,
+        data: tokenContract.interface.encodeFunctionData("transfer", [toAddress, amountInSmallestUnit]),
+        gasLimit: 21000n,
+        maxFeePerGas: feeData.maxFeePerGas,
+        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
         nonce: nonce,
-        chainId: '4200' // Merlin链的chainId
+        chainId: 4200n // Merlin链的chainId
     };
 
     // 生成交易哈希
-    const txHash = web3.utils.sha3(JSON.stringify(transaction));
+    const txHash = ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(transaction)));
     console.log('交易哈希:', txHash);
 
     return {
@@ -369,6 +312,7 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
 // 检查RPC节点连接
 async function checkRPCConnection() {
     try {
+        // 首先检查后端服务器是否可用
         const response = await fetch('/check-rpc', {
             method: 'GET',
             headers: {
@@ -382,12 +326,41 @@ async function checkRPCConnection() {
         
         const data = await response.json();
         if (!data.connected) {
-            throw new Error('无法连接到Merlin链RPC节点');
+            throw new Error(data.error || '无法连接到Merlin链RPC节点');
         }
+
+        // 如果后端服务器正常，再检查RPC节点连接
+        if (provider) {
+            try {
+                // 尝试获取最新的区块号
+                await provider.getBlockNumber();
+                // 尝试获取网络信息
+                const network = await provider.getNetwork();
+                console.log('当前网络信息:', {
+                    chainId: network.chainId,
+                    name: network.name
+                });
+                return true;
+            } catch (error) {
+                console.error('RPC节点连接检查失败:', error);
+                throw new Error('RPC节点连接不稳定，请稍后重试');
+            }
+        }
+
         return true;
     } catch (error) {
         console.error('RPC节点检查失败:', error);
-        showStatus('无法连接到服务器，请确保服务器已启动', 'error');
+        let errorMessage = '无法连接到服务器';
+        
+        if (error.message.includes('Failed to fetch')) {
+            errorMessage = '无法连接到后端服务器，请确保服务器已启动';
+        } else if (error.message.includes('RPC节点连接不稳定')) {
+            errorMessage = error.message;
+        } else if (error.message.includes('服务器响应错误')) {
+            errorMessage = '后端服务器响应异常，请稍后重试';
+        }
+        
+        showStatus(errorMessage, 'error');
         return false;
     }
 }
@@ -396,7 +369,7 @@ async function checkRPCConnection() {
 async function handleTransfer(event) {
     event.preventDefault();
     
-    if (!currentProvider) {
+    if (!signer) {
         showStatus('请先连接钱包', 'error');
         return;
     }
@@ -410,25 +383,16 @@ async function handleTransfer(event) {
         transferButton.disabled = true;
         showStatus('正在准备交易...', 'success');
 
-        // 检查RPC连接
-        if (!await checkRPCConnection()) {
-            throw new Error('服务器连接失败');
-        }
-
         // 准备交易数据
         const { transaction, txHash } = await prepareTokenTransaction(toAddress, amount, tokenAddress);
         
         // 构建签名消息
         const message = `请签名以下交易：\n\n接收地址：${toAddress}\n转账金额：${amount}\n代币合约：${tokenAddress}\n\n交易哈希：${txHash}`;
-        const messageHex = web3.utils.utf8ToHex(message);
         
         // 请求签名
         let signature;
         try {
-            signature = await currentProvider.request({
-                method: 'personal_sign',
-                params: [messageHex, userAddress]
-            });
+            signature = await signer.signMessage(message);
             console.log('签名结果:', signature);
         } catch (error) {
             if (error.code === 4001) {
@@ -453,7 +417,6 @@ async function handleTransfer(event) {
                 })
             });
 
-            // 检查响应状态
             if (!response.ok) {
                 const errorText = await response.text();
                 console.error('服务器响应错误:', errorText);
