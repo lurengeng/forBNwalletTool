@@ -35,6 +35,20 @@ const ERC20_ABI = [
         "name": "decimals",
         "outputs": [{"name": "", "type": "uint8"}],
         "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [],
+        "name": "symbol",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [],
+        "name": "name",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
     }
 ];
 
@@ -182,6 +196,29 @@ function showStatus(message, type) {
     statusDiv.className = type;
 }
 
+// 获取当前网络信息
+async function getNetworkInfo() {
+    try {
+        const chainId = await currentProvider.request({ method: 'eth_chainId' });
+        const networkVersion = await currentProvider.request({ method: 'net_version' });
+        return { chainId, networkVersion };
+    } catch (error) {
+        console.error('获取网络信息失败:', error);
+        return null;
+    }
+}
+
+// 验证合约地址
+async function validateContractAddress(address) {
+    try {
+        const code = await web3.eth.getCode(address);
+        return code !== '0x' && code !== '0x0';
+    } catch (error) {
+        console.error('验证合约地址失败:', error);
+        return false;
+    }
+}
+
 // 查询代币余额
 async function checkTokenBalance() {
     if (!currentProvider) {
@@ -196,15 +233,60 @@ async function checkTokenBalance() {
         balanceButton.disabled = true;
         showStatus('正在查询余额...', 'success');
 
+        // 获取并显示网络信息
+        const networkInfo = await getNetworkInfo();
+        console.log('当前网络信息:', networkInfo);
+
+        // 验证合约地址
+        const isValidContract = await validateContractAddress(tokenAddress);
+        if (!isValidContract) {
+            throw new Error('无效的代币合约地址');
+        }
+
+        // 创建合约实例
         const tokenContract = new web3.eth.Contract(ERC20_ABI, tokenAddress);
-        const decimals = await tokenContract.methods.decimals().call();
-        const balance = await tokenContract.methods.balanceOf(userAddress).call();
         
+        // 获取代币信息
+        let tokenInfo = {};
+        try {
+            tokenInfo = {
+                name: await tokenContract.methods.name().call(),
+                symbol: await tokenContract.methods.symbol().call(),
+                decimals: await tokenContract.methods.decimals().call()
+            };
+            console.log('代币信息:', tokenInfo);
+        } catch (error) {
+            console.warn('获取代币信息失败:', error);
+            // 如果获取代币信息失败，使用默认decimals
+            tokenInfo.decimals = 18;
+        }
+
+        // 查询余额
+        const balance = await tokenContract.methods.balanceOf(userAddress).call();
+        console.log('原始余额:', balance);
+        
+        // 格式化余额
         const formattedBalance = web3.utils.fromWei(balance, 'ether');
-        document.getElementById('tokenBalance').textContent = `余额: ${formattedBalance}`;
+        const displayText = tokenInfo.symbol 
+            ? `余额: ${formattedBalance} ${tokenInfo.symbol}`
+            : `余额: ${formattedBalance}`;
+            
+        document.getElementById('tokenBalance').textContent = displayText;
         showStatus('余额查询成功！', 'success');
     } catch (error) {
-        showStatus(`查询余额失败: ${error.message}`, 'error');
+        console.error('查询余额详细错误:', error);
+        let errorMessage = error.message;
+        
+        // 根据错误类型提供更具体的错误信息
+        if (error.message.includes('Out of Gas')) {
+            errorMessage = '查询失败：Gas不足或合约地址无效';
+        } else if (error.message.includes('invalid address')) {
+            errorMessage = '无效的代币合约地址';
+        } else if (error.message.includes('network')) {
+            errorMessage = '网络连接错误，请检查网络设置';
+        }
+        
+        showStatus(`查询余额失败: ${errorMessage}`, 'error');
     } finally {
         balanceButton.disabled = false;
     }
