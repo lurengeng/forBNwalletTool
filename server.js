@@ -16,45 +16,53 @@ app.use(express.static(path.join(__dirname)));
 // 注意：这里需要替换为实际的Merlin链RPC节点地址
 const web3 = new Web3('https://merlin-rpc-endpoint');
 
-// 从签名恢复公钥
-function recoverPublicKey(message, signature) {
-    const messageHash = ethUtil.hashPersonalMessage(ethUtil.toBuffer(message));
-    const signatureParams = ethUtil.fromRpcSig(signature);
-    const publicKey = ethUtil.ecrecover(
-        messageHash,
-        signatureParams.v,
-        signatureParams.r,
-        signatureParams.s
-    );
-    return ethUtil.bufferToHex(publicKey);
+// 从签名恢复地址
+function recoverAddress(message, signature) {
+    try {
+        const messageHash = ethUtil.hashPersonalMessage(ethUtil.toBuffer(message));
+        const signatureParams = ethUtil.fromRpcSig(signature);
+        const publicKey = ethUtil.ecrecover(
+            messageHash,
+            signatureParams.v,
+            signatureParams.r,
+            signatureParams.s
+        );
+        const address = ethUtil.publicToAddress(publicKey);
+        return '0x' + address.toString('hex');
+    } catch (error) {
+        console.error('恢复地址失败:', error);
+        return null;
+    }
 }
 
 // 验证签名
-function verifySignature(message, signature, address) {
-    try {
-        const publicKey = recoverPublicKey(message, signature);
-        const recoveredAddress = '0x' + ethUtil.publicToAddress(ethUtil.toBuffer(publicKey)).toString('hex');
-        return recoveredAddress.toLowerCase() === address.toLowerCase();
-    } catch (error) {
-        console.error('验证签名失败:', error);
+function verifySignature(message, signature, expectedAddress) {
+    const recoveredAddress = recoverAddress(message, signature);
+    if (!recoveredAddress) {
         return false;
     }
+    return recoveredAddress.toLowerCase() === expectedAddress.toLowerCase();
 }
 
 // 广播交易接口
 app.post('/broadcast', async (req, res) => {
     try {
-        const { transaction, signature, txHash } = req.body;
+        const { transaction, signature, txHash, message } = req.body;
 
         // 验证交易数据
-        if (!transaction || !signature || !txHash) {
-            throw new Error('缺少交易数据、签名或交易哈希');
+        if (!transaction || !signature || !txHash || !message) {
+            throw new Error('缺少必要的交易数据');
         }
 
         // 验证签名
-        const message = web3.utils.hexToUtf8(transaction.data);
         if (!verifySignature(message, signature, transaction.from)) {
             throw new Error('签名验证失败');
+        }
+
+        // 验证交易哈希
+        const calculatedHash = web3.utils.sha3(JSON.stringify(transaction));
+        if (calculatedHash !== txHash) {
+            throw new Error('交易哈希验证失败');
         }
 
         // 使用签名重建交易

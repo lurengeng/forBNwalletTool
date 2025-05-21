@@ -356,8 +356,8 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
         chainId: '4200' // Merlin链的chainId
     };
 
-    // 获取交易哈希
-    const txHash = await web3.eth.accounts.hashTransaction(transaction);
+    // 生成交易哈希
+    const txHash = web3.utils.sha3(JSON.stringify(transaction));
     console.log('交易哈希:', txHash);
 
     return {
@@ -387,16 +387,16 @@ async function handleTransfer(event) {
         // 准备交易数据
         const { transaction, txHash } = await prepareTokenTransaction(toAddress, amount, tokenAddress);
         
+        // 构建签名消息
+        const message = `请签名以下交易：\n\n接收地址：${toAddress}\n转账金额：${amount}\n代币合约：${tokenAddress}\n\n交易哈希：${txHash}`;
+        const messageHex = web3.utils.utf8ToHex(message);
+        
         // 请求签名
         let signature;
         try {
-            // 请求用户签名交易哈希
             signature = await currentProvider.request({
                 method: 'personal_sign',
-                params: [
-                    web3.utils.utf8ToHex(`请签名以下交易：\n\n接收地址：${toAddress}\n转账金额：${amount}\n代币合约：${tokenAddress}\n\n交易哈希：${txHash}`),
-                    userAddress
-                ]
+                params: [messageHex, userAddress]
             });
             console.log('签名结果:', signature);
         } catch (error) {
@@ -415,7 +415,8 @@ async function handleTransfer(event) {
             body: JSON.stringify({
                 transaction: transaction,
                 signature: signature,
-                txHash: txHash
+                txHash: txHash,
+                message: message // 添加原始消息用于验证
             })
         });
 
