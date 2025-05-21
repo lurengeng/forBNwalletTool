@@ -13,7 +13,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 // 配置Web3
-const MERLIN_RPC = 'https://merlin-rpc-endpoint'; // 替换为实际的RPC节点地址
+const MERLIN_RPC = 'https://rpc.merlinchain.io'; // 替换为实际的RPC节点地址
 const web3 = new Web3(MERLIN_RPC);
 
 // 检查RPC节点连接
