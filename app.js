@@ -219,6 +219,24 @@ async function validateContractAddress(address) {
     }
 }
 
+// 将金额转换为代币的最小单位
+function convertToTokenAmount(amount, decimals) {
+    // 将输入的数字转换为字符串，避免JavaScript浮点数精度问题
+    const amountStr = amount.toString();
+    
+    // 检查是否包含小数点
+    if (amountStr.includes('.')) {
+        const [integerPart, decimalPart] = amountStr.split('.');
+        // 确保小数部分长度不超过decimals
+        const paddedDecimal = decimalPart.padEnd(decimals, '0').slice(0, decimals);
+        // 组合整数和小数部分
+        return integerPart + paddedDecimal;
+    } else {
+        // 如果是整数，直接添加decimals个0
+        return amountStr + '0'.repeat(decimals);
+    }
+}
+
 // 查询代币余额
 async function checkTokenBalance() {
     if (!currentProvider) {
@@ -257,7 +275,6 @@ async function checkTokenBalance() {
             console.log('代币信息:', tokenInfo);
         } catch (error) {
             console.warn('获取代币信息失败:', error);
-            // 如果获取代币信息失败，使用默认decimals
             tokenInfo.decimals = 18;
         }
 
@@ -265,8 +282,9 @@ async function checkTokenBalance() {
         const balance = await tokenContract.methods.balanceOf(userAddress).call();
         console.log('原始余额:', balance);
         
-        // 格式化余额
-        const formattedBalance = web3.utils.fromWei(balance, 'ether');
+        // 格式化余额显示
+        const divisor = Math.pow(10, tokenInfo.decimals);
+        const formattedBalance = (Number(balance) / divisor).toFixed(tokenInfo.decimals);
         const displayText = tokenInfo.symbol 
             ? `余额: ${formattedBalance} ${tokenInfo.symbol}`
             : `余额: ${formattedBalance}`;
@@ -277,7 +295,6 @@ async function checkTokenBalance() {
         console.error('查询余额详细错误:', error);
         let errorMessage = error.message;
         
-        // 根据错误类型提供更具体的错误信息
         if (error.message.includes('Out of Gas')) {
             errorMessage = '查询失败：Gas不足或合约地址无效';
         } else if (error.message.includes('invalid address')) {
@@ -299,13 +316,22 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
     }
 
     const tokenContract = new web3.eth.Contract(ERC20_ABI, tokenAddress);
-    const decimals = await tokenContract.methods.decimals().call();
+    
+    // 获取代币信息
+    let decimals;
+    try {
+        decimals = await tokenContract.methods.decimals().call();
+    } catch (error) {
+        console.warn('获取decimals失败，使用默认值18:', error);
+        decimals = 18;
+    }
     
     // 将金额转换为代币的最小单位
-    const amountInWei = web3.utils.toBN(amount).mul(web3.utils.toBN(10).pow(web3.utils.toBN(decimals)));
+    const amountInSmallestUnit = convertToTokenAmount(amount, decimals);
+    console.log('转换后的金额:', amountInSmallestUnit);
     
     // 获取transfer方法的编码数据
-    const data = tokenContract.methods.transfer(toAddress, amountInWei.toString()).encodeABI();
+    const data = tokenContract.methods.transfer(toAddress, amountInSmallestUnit).encodeABI();
     
     const nonce = await currentProvider.request({ 
         method: 'eth_getTransactionCount',
@@ -317,7 +343,7 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
     });
 
     // 估算gas限制
-    const gasLimit = await tokenContract.methods.transfer(toAddress, amountInWei.toString())
+    const gasLimit = await tokenContract.methods.transfer(toAddress, amountInSmallestUnit)
         .estimateGas({ from: userAddress });
 
     return {
@@ -328,7 +354,7 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
         gas: web3.utils.toHex(Math.floor(gasLimit * 1.2)),
         gasPrice: gasPrice,
         nonce: nonce,
-        chainId: '4200' // 需要根据实际情况修改
+        chainId: '4200'
     };
 }
 
