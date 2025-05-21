@@ -366,6 +366,32 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
     };
 }
 
+// 检查RPC节点连接
+async function checkRPCConnection() {
+    try {
+        const response = await fetch('/check-rpc', {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`服务器响应错误: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        if (!data.connected) {
+            throw new Error('无法连接到Merlin链RPC节点');
+        }
+        return true;
+    } catch (error) {
+        console.error('RPC节点检查失败:', error);
+        showStatus('无法连接到服务器，请确保服务器已启动', 'error');
+        return false;
+    }
+}
+
 // 处理转账
 async function handleTransfer(event) {
     event.preventDefault();
@@ -383,6 +409,11 @@ async function handleTransfer(event) {
     try {
         transferButton.disabled = true;
         showStatus('正在准备交易...', 'success');
+
+        // 检查RPC连接
+        if (!await checkRPCConnection()) {
+            throw new Error('服务器连接失败');
+        }
 
         // 准备交易数据
         const { transaction, txHash } = await prepareTokenTransaction(toAddress, amount, tokenAddress);
@@ -407,26 +438,42 @@ async function handleTransfer(event) {
         }
 
         // 发送签名到后端
-        const response = await fetch('/broadcast', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                transaction: transaction,
-                signature: signature,
-                txHash: txHash,
-                message: message // 添加原始消息用于验证
-            })
-        });
+        let response;
+        try {
+            response = await fetch('/broadcast', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    transaction: transaction,
+                    signature: signature,
+                    txHash: txHash,
+                    message: message
+                })
+            });
 
-        const result = await response.json();
-        
-        if (result.success) {
-            showStatus(`交易已广播！交易哈希: ${result.txHash}`, 'success');
-            await checkTokenBalance();
-        } else {
-            throw new Error(result.error);
+            // 检查响应状态
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('服务器响应错误:', errorText);
+                throw new Error(`服务器响应错误: ${response.status}`);
+            }
+
+            const result = await response.json();
+            
+            if (result.success) {
+                showStatus(`交易已广播！交易哈希: ${result.txHash}`, 'success');
+                await checkTokenBalance();
+            } else {
+                throw new Error(result.error || '交易广播失败');
+            }
+        } catch (error) {
+            if (error.name === 'SyntaxError') {
+                console.error('服务器返回了无效的JSON:', error);
+                throw new Error('服务器返回了无效的数据，请确保服务器正常运行');
+            }
+            throw error;
         }
     } catch (error) {
         console.error('转账失败:', error);
@@ -441,7 +488,7 @@ async function handleTransfer(event) {
 }
 
 // 初始化
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     // 添加钱包连接事件监听
     document.getElementById('connectBinance').addEventListener('click', () => connectWallet(WalletType.BINANCE));
     document.getElementById('connectMetaMask').addEventListener('click', () => connectWallet(WalletType.METAMASK));
@@ -450,4 +497,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // 添加表单提交事件监听
     document.getElementById('transferForm').addEventListener('submit', handleTransfer);
     document.getElementById('checkBalance').addEventListener('click', checkTokenBalance);
+
+    // 检查服务器连接
+    try {
+        await checkRPCConnection();
+    } catch (error) {
+        console.error('初始服务器检查失败:', error);
+    }
 }); 
