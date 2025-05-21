@@ -333,28 +333,36 @@ async function prepareTokenTransaction(toAddress, amount, tokenAddress) {
     // 获取transfer方法的编码数据
     const data = tokenContract.methods.transfer(toAddress, amountInSmallestUnit).encodeABI();
     
-    const nonce = await currentProvider.request({ 
-        method: 'eth_getTransactionCount',
-        params: [userAddress, 'latest']
-    });
+    // 获取nonce和gasPrice
+    const [nonce, gasPrice] = await Promise.all([
+        currentProvider.request({ 
+            method: 'eth_getTransactionCount',
+            params: [userAddress, 'latest']
+        }),
+        currentProvider.request({
+            method: 'eth_gasPrice'
+        })
+    ]);
 
-    const gasPrice = await currentProvider.request({
-        method: 'eth_gasPrice'
-    });
-
-    // 估算gas限制
-    const gasLimit = await tokenContract.methods.transfer(toAddress, amountInSmallestUnit)
-        .estimateGas({ from: userAddress });
-
-    return {
+    // 构建交易对象
+    const transaction = {
         from: userAddress,
         to: tokenAddress,
         value: '0x0',
         data: data,
-        gas: web3.utils.toHex(Math.floor(gasLimit * 1.2)),
+        gas: '0x' + (21000).toString(16), // 使用固定gas限制
         gasPrice: gasPrice,
         nonce: nonce,
-        chainId: '4200'
+        chainId: '4200' // Merlin链的chainId
+    };
+
+    // 获取交易哈希
+    const txHash = await web3.eth.accounts.hashTransaction(transaction);
+    console.log('交易哈希:', txHash);
+
+    return {
+        transaction,
+        txHash
     };
 }
 
@@ -376,49 +384,56 @@ async function handleTransfer(event) {
         transferButton.disabled = true;
         showStatus('正在准备交易...', 'success');
 
-        const transaction = await prepareTokenTransaction(toAddress, amount, tokenAddress);
+        // 准备交易数据
+        const { transaction, txHash } = await prepareTokenTransaction(toAddress, amount, tokenAddress);
         
-        // 根据不同钱包处理签名
+        // 请求签名
         let signature;
-        if (currentWallet === WalletType.METAMASK) {
-            // MetaMask直接发送交易
+        try {
+            // 请求用户签名交易哈希
             signature = await currentProvider.request({
-                method: 'eth_sendTransaction',
-                params: [transaction]
+                method: 'personal_sign',
+                params: [
+                    web3.utils.utf8ToHex(`请签名以下交易：\n\n接收地址：${toAddress}\n转账金额：${amount}\n代币合约：${tokenAddress}\n\n交易哈希：${txHash}`),
+                    userAddress
+                ]
             });
-            showStatus(`交易已发送！交易哈希: ${signature}`, 'success');
-            await checkTokenBalance();
-            return;
-        } else {
-            // 其他钱包请求签名
-            signature = await currentProvider.request({
-                method: 'eth_signTransaction',
-                params: [transaction]
-            });
-
-            // 发送签名到后端
-            const response = await fetch('/broadcast', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    transaction: transaction,
-                    signature: signature
-                })
-            });
-
-            const result = await response.json();
-            
-            if (result.success) {
-                showStatus(`交易已广播！交易哈希: ${result.txHash}`, 'success');
-                await checkTokenBalance();
-            } else {
-                throw new Error(result.error);
+            console.log('签名结果:', signature);
+        } catch (error) {
+            if (error.code === 4001) {
+                throw new Error('用户拒绝了签名请求');
             }
+            throw error;
+        }
+
+        // 发送签名到后端
+        const response = await fetch('/broadcast', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                transaction: transaction,
+                signature: signature,
+                txHash: txHash
+            })
+        });
+
+        const result = await response.json();
+        
+        if (result.success) {
+            showStatus(`交易已广播！交易哈希: ${result.txHash}`, 'success');
+            await checkTokenBalance();
+        } else {
+            throw new Error(result.error);
         }
     } catch (error) {
-        showStatus(`转账失败: ${error.message}`, 'error');
+        console.error('转账失败:', error);
+        let errorMessage = error.message;
+        if (error.code === 4001) {
+            errorMessage = '用户取消了签名';
+        }
+        showStatus(`转账失败: ${errorMessage}`, 'error');
     } finally {
         transferButton.disabled = false;
     }
